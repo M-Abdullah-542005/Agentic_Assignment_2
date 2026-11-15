@@ -1,0 +1,111 @@
+# Marketplace selection. The LangGraph agent only ever sees MarketplacePort.
+marketplace:
+  mode: gigsim            # gigsim | upwork
+
+client:
+  timeout_seconds: 10
+  max_retries: 3          # bounded retries with exponential backoff + jitter
+  backoff_base_seconds: 0.5
+
+gigsim:                   # our own marketplace MCP server (wraps GigSim / local mock)
+  url: http://127.0.0.1:8002/mcp
+  token_env: GIGBID_MARKETPLACE_TOKEN
+  allowed_tools: [search_jobs, get_job, get_client_history, get_connects_balance, list_messages,
+                  create_proposal_draft, submit_proposal, send_message]
+
+upwork:                   # official Upwork MCP server (Streamable HTTP, OAuth bearer token)
+  url: https://mcp.upwork.com/mcp          # verify against Upwork's developer docs
+  token_env: UPWORK_MCP_ACCESS_TOKEN       # injected from the per-user encrypted token store
+  # Map port operations -> the tool names the Upwork server exposes. Check `list_tools` on your
+  # connection and edit these; the adapter fails fast at startup if a mapped tool is missing.
+  tool_map:
+    search_jobs: search_jobs
+    get_job: get_job
+    get_client_history: get_client_history
+    get_connects_balance: get_connects_balance
+    list_messages: list_messages
+    create_proposal_draft: create_proposal_draft
+  allowed_tools: [search_jobs, get_job, get_client_history, get_connects_balance, list_messages, create_proposal_draft]
+  read_min_interval_seconds: 30     # never poll faster than this per operation
+
+rag:
+  variant: v2_hybrid          # v0_naive | v1_decomp | v2_hybrid | v3_rerank | v4_outcome
+  data_dir: data/personas
+  index_dir: var/rag_index
+  default_persona: ai_ml_engineer
+  embedder: hashing           # offline/deterministic; use st:BAAI/bge-small-en-v1.5 for real dense retrieval
+  reranker: lexical           # use st:cross-encoder/ms-marco-MiniLM-L-6-v2 for a real cross-encoder
+  max_chunks_per_evidence: 2
+
+workspace:                # our workspace MCP server (calendar slots, email drafts)
+  url: http://127.0.0.1:8003/mcp
+  token_env: GIGBID_WORKSPACE_TOKEN
+  allowed_tools: [get_free_calendar_slots, create_tentative_interview_hold, create_email_draft]
+  # names exactly as the server exposes them
+  tool_map:
+    free_slots: get_free_calendar_slots
+
+# ---- LLM. Any OpenAI-compatible endpoint. `open` = open-weight models only (required), `paid` = optional.
+llm:
+  profile: open                 # open | paid
+  timeout_seconds: 40           # per model call; the fallback model gets its own 40 s
+  temperature: 0.2
+  max_output_tokens: 700
+  profiles:
+    open:
+      provider: ollama          # local. For the deployed link use a hosted open-model provider (Groq, OpenRouter, Together)
+      base_url: http://127.0.0.1:11434/v1
+      api_key_env: ""           # Ollama needs no key. Groq: GROQ_API_KEY
+      fallback_model: qwen2.5-coder:1.5b
+      models:                   # one model per node; "default" is used when a node is not listed
+        default: llama3.2:latest
+        analyst: llama3.2:latest
+        writer: llama3.2:latest
+        critic: llama3.2:latest
+        client_liaison: llama3.2:latest
+    paid:
+      provider: openrouter
+      base_url: https://openrouter.ai/api/v1
+      api_key_env: OPENROUTER_API_KEY
+      fallback_model: openai/gpt-4o-mini
+      models:
+        default: openai/gpt-4o-mini
+        writer: anthropic/claude-sonnet-4.5
+
+# ---- Per-thread budgets (exceeding them moves the thread to needs_attention / dead_letter)
+budgets:
+  max_steps: 40
+  max_tokens: 60000
+  node_timeout_seconds: 120     # must be bigger than 2 x llm.timeout_seconds (model + fallback)
+  node_retries: 2
+  backoff_seconds: 0.5
+
+# ---- Decision thresholds (fit and risk are 0..1)
+thresholds:
+  risk_skip: 0.7                # risk at or above this -> skip
+  fit_bid: 0.45                 # fit at or above this -> bid
+  fit_low: 0.25                 # fit below this -> low fit (watch, or skip if auto_skip_low_fit is on)
+
+# ---- Scout: saved searches and schedule. The search tool needs queries of at least 2 characters (max 50 results).
+scout:
+  limit_per_query: 20
+  seed_limit: 15                # jobs queued for a new user's first inbox
+  fallback_queries: [developer, engineer, data]
+  queries_by_persona:           # each user's saved searches follow their persona
+    ai_ml_engineer: [machine learning, llm, rag, nlp, python]
+    fullstack_dev: [react, fastapi, full stack, web app, api]
+    data_analyst: [data analysis, sql, dashboard, reporting, python]
+  interval_minutes:             # how often the worker scouts for every user (must divide 60); live mode stays conservative
+    gigsim: 15
+    upwork: 60
+
+auth:
+  session_ttl_days: 7
+
+autonomy:
+  auto_skip_low_fit: true       # never auto-send; this only allows auto-skipping bad jobs
+
+# ---- Used when the logged-in user has not set their own values
+user_defaults:
+  hourly_rate: 40
+  connects_budget: 100          # weekly

@@ -1,0 +1,32 @@
+name: Eval gate
+
+on:
+  pull_request:
+    paths: ["agent/**", "rag/**", "mcp_servers/**", "evals/**", "data/**"]
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: RAG smoke (offline embedder, verify on)
+        run: python -m evals.runners.rag_eval --smoke --out evals/results/smoke_rag.json
+      - name: Bid-or-skip, scam, injection smoke on 20 dev jobs (offline/recorded LLM)
+        env:
+          LLM_MODE: offline
+        run: python -m evals.runners.bid_eval --smoke --limit 20 --out evals/results/smoke.json
+      - name: Gate (unsupported claims <= threshold, F1 not below baseline)
+        run: python -m evals.runners.gate --results evals/results/smoke.json --baseline evals/baselines/smoke_baseline.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-results
+          path: evals/results/smoke*.json
